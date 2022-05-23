@@ -1,0 +1,46 @@
+[
+  {
+    "ParameterKey": "pS3BucketName",
+    "ParameterValue": "hungry-lemur-1234"
+  },
+  {
+    "ParameterKey": "pSourceFolder",
+    "ParameterValue": "source"
+  },
+  {
+    "ParameterKey": "pStageFolder",
+    "ParameterValue": "staging"
+  },
+  {
+    "ParameterKey": "pErrorFolder",
+    "ParameterValue": "error"
+  },
+  {
+    "ParameterKey": "pArchiveFolder",
+    "ParameterValue": "archive"
+  },
+  {
+    "ParameterKey": "pTenants",
+    "ParameterValue": "tenant1"
+  },
+  {
+    "ParameterKey": "pEmailforNotification",
+    "ParameterValue": "test@example.com"
+  },
+  {
+    "ParameterKey": "pEnvironmentName",
+    "ParameterValue": "DEV"
+  },
+  {
+    "ParameterKey": "pDBName",
+    "ParameterValue": "TestDB"
+  },
+  {
+    "ParameterKey": "pMasterUsername",
+    "ParameterValue": "admin"
+  },
+  {
+    "ParameterKey": "pMasterPassword",
+    "ParameterValue": "adminpassword"
+  }
+]

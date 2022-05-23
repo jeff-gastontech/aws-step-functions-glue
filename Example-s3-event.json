@@ -1,0 +1,28 @@
+{
+  "version": "0",
+  "id": "db78f308-9aaa-c0ac-9ddb-60e295c16546",
+  "detail-type": "Object Created",
+  "source": "aws.s3",
+  "account": "123456789",
+  "time": "2022-05-14T17:20:57Z",
+  "region": "us-east-1",
+  "resources": [
+    "arn:aws:s3:::hungry-lemur-123"
+  ],
+  "detail": {
+    "version": "0",
+    "bucket": {
+      "name": "hungry-lemur-123"
+    },
+    "object": {
+      "key": "source/test.csv.pgp",
+      "size": 11817,
+      "etag": "87d582a1ee8e22cdf12ebd6d285f237c",
+      "sequencer": "00627FE4F944BF6FFE"
+    },
+    "request-id": "VW34JV0R3F5FZD6N",
+    "requester": "123456789",
+    "source-ip-address": "99.49.0.26",
+    "reason": "PutObject"
+  }
+}

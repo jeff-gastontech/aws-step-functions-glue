@@ -1,0 +1,942 @@
+Transform: AWS::Serverless-2016-10-31
+
+Description: "This is a template to create ETL pipeline pattern with AWS Step Functions"
+
+Parameters: 
+
+  pS3BucketName:
+    Type: String
+    Description: "Unique S3 bucket to create"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9_-]*"
+
+  pStageFolder:
+    Type: String
+    Description: "Folder to store staging files"
+    Default: "stage"
+
+  pArchiveFolder:
+    Type: String
+    Description: "Folder to store archived dataset"
+    Default: "archive"
+
+  pErrorFolder:
+    Type: String
+    Description: "Folder to store dataset for any error"
+    Default: "error"
+
+  pSourceFolder:
+    Type: String
+    Description: "Source Folder to upload raw csv dataset to trigger the AWS Step functions"
+    Default: "source"
+
+  pTenants:
+    Type: String
+    Description: "Tenant subfolders"
+    Default: "tenant1"
+
+  pEmailforNotification:
+    Description: "Valid email address to send success or error notification"
+    Type: String
+    
+  pEnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+
+  pVpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+
+  pPublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+
+  pPublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+
+  pPrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+
+  pPrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+
+  pEnvironment:
+    Description: Environment to deploy
+    Type: String
+    Default: DEV
+
+  pDBName:
+    Description: DB Name to create
+    Type: String
+    Default: TestDB
+
+  pMasterUsername:
+    Description: Master username in RDS
+    Type: String
+    Default: admin
+
+  pMasterPassword:
+    Description: Master password in RDS
+    Type: String
+    Default: adminpassword
+
+Resources:
+
+##################### Start Networking ####################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref pVpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref pEnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref pEnvironmentName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref pPublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironmentName} Public Subnet (AZ1)
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref pPublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironmentName} Public Subnet (AZ2)
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      CidrBlock: !Ref pPrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironmentName} Private Subnet (AZ1)
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref pPrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironmentName} Private Subnet (AZ2)
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironmentName} Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvironmentName} Private Routes (AZ1)
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet2
+
+  NoIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "no-ingress-sg"
+      GroupDescription: "Security group with no ingress rule"
+      VpcId: !Ref VPC
+##################### End Networking ######################
+##################### Start Endpoints #####################
+
+  S3Endpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PublicRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+
+  GlueEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.glue'
+      PrivateDnsEnabled: true
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+
+##################### End Endpoints #######################
+##################### Start DB ############################
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Group for private db access
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  DBEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open database for access to own IP range
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: !Ref pVpcCIDR
+          FromPort: 3306
+          IpProtocol: "tcp"
+          ToPort: 3306
+      SecurityGroupEgress:
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+  DBSelfReferenceSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: DBEC2SecurityGroup
+    Properties:
+      GroupId: !Ref DBEC2SecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref DBEC2SecurityGroup
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref pDBName
+      DBInstanceClass: db.t3.micro
+      DBInstanceIdentifier: test-db
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      AllocatedStorage: 20
+      Engine: MySQL
+      EngineVersion: 8.0.28
+      MasterUsername: !Ref pMasterUsername
+      MasterUserPassword: !Ref pMasterPassword
+      VPCSecurityGroups:
+        - !GetAtt DBEC2SecurityGroup.GroupId
+
+##################### End DB ##############################
+##################### Start Lambdas #######################
+
+  LambdaLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: cfnresource-lib
+      Description: My layer
+      ContentUri: ./myLayer
+      CompatibleRuntimes:
+        - python3.6
+        - python3.7
+        - python3.8
+      LicenseInfo: MIT
+
+  S3CustomResource:
+    Type: Custom::S3CustomResource
+    DependsOn: DBInstance
+    Properties:
+      ServiceToken: !GetAtt LambdaFunctionS3Object.Arn
+      the_bucket: !Ref S3Bucket
+      dirs_to_create: !Join [ ",", [!Ref pSourceFolder,!Ref pStageFolder,!Ref pErrorFolder,!Ref pArchiveFolder]]
+      tenants_to_create: !Ref pTenants
+      file_prefix: "glue/gluejob.py"
+      file_content: !Sub |
+        import sys
+        from awsglue.transforms import *
+        from awsglue.utils import getResolvedOptions
+        from pyspark.context import SparkContext, SparkConf
+        from awsglue.context import GlueContext
+        from awsglue.job import Job
+        import time 
+        from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+        import pymysql
+        import boto3
+        
+        session = boto3.Session(region_name="${AWS::Region}")
+        ssm = session.client("ssm")
+        
+        args = getResolvedOptions(sys.argv,
+                          ['JOB_NAME',
+                           'tenant',
+                           'file_key',
+                           'bucket'])
+        
+        tenant = args['tenant'];
+        file_key = args['file_key']
+        bucket = args['bucket']
+        
+        print("tenant: " + tenant)
+        print("file_key: " + file_key)
+        print("bucket: " + bucket)
+
+        
+        sc = SparkContext()
+        glueContext = GlueContext(sc)
+        spark = glueContext.spark_session
+        
+        url = ssm.get_parameter(Name=tenant+".db.url", WithDecryption=True)['Parameter']['Value']
+        user = ssm.get_parameter(Name=tenant+".db.username", WithDecryption=True)['Parameter']['Value']
+        password = ssm.get_parameter(Name=tenant+".db.password", WithDecryption=True)['Parameter']['Value']
+        database = ssm.get_parameter(Name=tenant+".db.database", WithDecryption=True)['Parameter']['Value']
+          
+        connection_props = {
+          "host": url,
+          "database": database,
+          "user": user,
+          "password": password
+        }
+        
+        brConnect = sc.broadcast(connection_props)
+        
+        def process_row(row, cursor):
+          employee_id = row.__getitem__("EMPLOYEE_ID")
+          first_name = row.__getitem__("FIRST_NAME")
+          last_name = row.__getitem__("LAST_NAME")
+          email = row.__getitem__("EMAIL")
+          phone_number = row.__getitem__("PHONE_NUMBER")
+          
+          upsert_query = """ INSERT INTO employee
+          (EMPLOYEE_ID, FIRST_NAME, LAST_NAME, EMAIL, PHONE_NUMBER) VALUES (%(employee_id)s,%(first_name)s,%(last_name)s,%(email)s,%(phone_number)s)
+          ON DUPLICATE KEY UPDATE employee_id=%(employee_id)s,first_name=%(first_name)s,last_name=%(last_name)s,email=%(email)s,phone_number=%(phone_number)s
+          """
+          cursor.execute(upsert_query, {"employee_id":employee_id,"first_name":first_name,"last_name":last_name,"email":email,"phone_number":phone_number})
+        
+        def process_partition(partition):
+          connection_mysql8_options = brConnect.value
+          
+          db_conn = pymysql.connect(host=connection_mysql8_options.get("host"),
+          database=connection_mysql8_options.get("database"),
+          user=connection_mysql8_options.get("user"),
+          password=connection_mysql8_options.get("password"))
+          dbc_merge = db_conn.cursor()
+          
+          for row in partition:
+            process_row(row, dbc_merge)
+          
+          db_conn.commit()
+          dbc_merge.close()
+          db_conn.close()
+        
+        # Read from JDBC databases with custom driver
+        df_emp = glueContext.create_dynamic_frame_from_options(
+          connection_type="s3",
+          format="csv",
+          connection_options={
+          "paths": ["s3://"+bucket+"/"+file_key]
+        },
+          format_options={
+          "withHeader": True,
+          "separator": ","
+        })
+        df_emp.printSchema()
+        df_emp.show(10)
+        df_emp.toDF().rdd.coalesce(10).foreachPartition(process_partition)
+
+  LambdaFunctionS3Object:
+     Type: AWS::Serverless::Function
+     Properties:
+       Layers:
+         - !Ref LambdaLayer
+       Description: "Work with S3 Buckets!"
+       Handler: s3object.handler
+       CodeUri: lambda
+       Role: !GetAtt BasicLambdaRole.Arn
+       Timeout: 360
+       Runtime: python3.6
+
+  EncryptFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Role: !GetAtt BasicLambdaRole.Arn
+      Handler: org.springframework.cloud.function.adapter.aws.FunctionInvoker::handleRequest
+      CodeUri: encrypt-decrypt-file/target/encrypt-decrypt-file-1.0.0.RELEASE-aws.jar
+      Runtime: java11
+      Timeout: 45
+      MemorySize: 512
+      Environment:
+        Variables:
+          spring_cloud_function_definition: encryptFile
+
+  DecryptFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Role: !GetAtt BasicLambdaRole.Arn
+      Handler: org.springframework.cloud.function.adapter.aws.FunctionInvoker::handleRequest
+      CodeUri: encrypt-decrypt-file/target/encrypt-decrypt-file-1.0.0.RELEASE-aws.jar
+      Runtime: java11
+      Timeout: 45
+      MemorySize: 512
+      Environment:
+        Variables:
+          spring_cloud_function_definition: decryptFile
+
+##################### End Lambdas #########################
+##################### Start IAM ###########################
+
+  BasicLambdaRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"  
+      ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - !Ref BasicManagedPolicyforlambda
+
+  BasicManagedPolicyforlambda: 
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: "THis is sample CFN template"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "s3listaccess"
+            Effect: "Allow"
+            Action: 
+              - "s3:List*"
+            Resource: !Sub "arn:aws:s3:::${pS3BucketName}"
+
+          - Sid: "s3putaccess"
+            Effect: "Allow"
+            Action: 
+              - "s3:Get*"
+              - "s3:Put*"
+              - "s3:Delete*"
+            Resource: !Sub "arn:aws:s3:::${pS3BucketName}/*"
+
+          - Sid: "s3deletebucket"
+            Effect: "Allow"
+            Action:
+              - "s3:DeleteBucket"
+            Resource: !Sub "arn:aws:s3:::${pS3BucketName}"
+
+          - Sid: "ssmaccess"
+            Effect: "Allow"
+            Action:
+              -   "ssm:GetParameter"
+              -   "ssm:GetParameters"
+              -   "ssm:GetParametersByPath"
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+
+  StepFunctionRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:   
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "states.amazonaws.com"  
+            Action: 
+              - "sts:AssumeRole"  
+      ManagedPolicyArns:
+          - !Ref ManagedPolicyForStepFunction
+
+  ManagedPolicyForStepFunction:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: "Policy for step function"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Sid: "lambdainvoke"
+            Effect: "Allow"
+            Action: "lambda:InvokeFunction"
+            Resource: 
+              - !GetAtt  EncryptFunction.Arn
+              - !GetAtt  DecryptFunction.Arn
+          - Sid: "glueaccess"
+            Effect: "Allow"
+            Action: 
+              - "glue:StartJobRun"
+              - "glue:GetJobRun"
+              - "glue:GetJobRuns"
+              - "glue:BatchStopJobRun"
+            Resource: "*"
+
+          - Sid: "xrayaccess"
+            Effect: "Allow"
+            Action:
+              -  "xray:PutTraceSegments"
+              -  "xray:PutTelemetryRecords"
+              -  "xray:GetSamplingRules"
+              -  "xray:GetSamplingTargets"
+            Resource: "*"
+          - Sid: "SNStopicaccess"
+            Effect: "Allow"
+            Action: "sns:Publish"
+            Resource: !Ref  SNSTopic
+          - Sid: "s3putaccess"
+            Effect: "Allow"
+            Action: 
+              - "s3:Get*"
+              - "s3:Put*"
+              - "s3:Delete*"
+            Resource: !Sub "arn:aws:s3:::${pS3BucketName}/*"
+
+  EventBridgeRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref ManagedPolicyForEventBridge
+
+  ManagedPolicyForEventBridge:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: "Role for event bridge rule to invoke step function"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "stepfunctioninvoke"
+            Effect: "Allow"
+            Action: "states:StartExecution"
+            Resource: !Sub ${FileUploadStepFunction}
+
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "ec2TagAccess"
+                Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Condition:
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - aws-glue-service-resource
+                Resource:
+                  - arn:aws:ec2:*:*:network-interface/*
+                  - arn:aws:ec2:*:*:security-group/*
+                  - arn:aws:ec2:*:*:instance/*
+              - Sid: "ec2AndGlue"
+                Effect: Allow
+                Action:
+                  - glue:*
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketAcl
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeRouteTables
+                  - ec2:CreateNetworkInterface
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcAttribute
+                  - iam:ListRolePolicies
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - cloudwatch:PutMetricData
+                Resource:
+                  - '*'
+              - Sid: "glueDBAndConnections"
+                Effect: Allow
+                Action: glue:*
+                Resource:
+                  - arn:aws:glue:us-east-1:313312754149:catalog
+                  - arn:aws:glue:us-east-1:313312754149:connection/db-connection
+              - Sid: "s3listaccess"
+                Effect: "Allow"
+                Action:
+                  - "s3:List*"
+                Resource: !Sub "arn:aws:s3:::${pS3BucketName}"
+              - Sid: "s3putaccess"
+                Effect: "Allow"
+                Action:
+                  - "s3:Get*"
+                  - "s3:Put*"
+                  - "s3:Delete*"
+                Resource: !Sub "arn:aws:s3:::${pS3BucketName}/*"
+              - Sid: "cwlog"
+                Effect: "Allow"
+                Action: "logs:*"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*"
+              - Sid: "ssmaccess"
+                Effect: "Allow"
+                Action:
+                  -   "ssm:GetParameter"
+                  -   "ssm:GetParameters"
+                  -   "ssm:GetParametersByPath"
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+
+##################### End IAM #############################
+##################### Start Events ########################
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: "alias/aws/sns"
+      Subscription:
+        - Endpoint: !Ref pEmailforNotification
+          Protocol: email
+
+  FileUploadRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Rule for kicking off step function to process file"
+      EventPattern: !Sub |
+        {
+          "source": ["aws.s3"],
+          "detail-type": ["Object Created"],
+          "detail": {
+            "bucket": {
+              "name": ["${pS3BucketName}"]
+            },
+            "object": {
+              "key": [{
+                "prefix": "source/"
+              }]
+            }
+          }
+        }
+      Targets:
+        - Arn: !Ref FileUploadStepFunction
+          Id: !GetAtt FileUploadStepFunction.Name
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+##################### End Events ######################
+
+  FileUploadStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      TracingConfiguration:
+        Enabled: true
+      RoleArn: !GetAtt StepFunctionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Step function for decrypting file and invoking glue importer",
+          "StartAt": "Is it a file?",
+          "States": {
+            "Is it a file?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.detail.object.key",
+                  "StringMatches": "*/",
+                  "Next": "Not a file"
+                }
+              ],
+              "Default": "Decrypt File"
+            },
+            "Not a file": {
+              "Type": "Succeed"
+            },
+            "Decrypt File": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DecryptFunction}",
+                "Payload": {
+                  "fileName.$": "$.detail.object.key",
+                  "bucket.$": "$.detail.bucket.name"
+                }
+              },
+              "Next": "Glue StartJobRun",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Comment": "Handle Errors",
+                  "Next": "Archive Failed Source File",
+                  "ResultPath": "$.error-info"
+                }
+              ],
+              "ResultPath": "$.DecryptionResult"
+            },
+            "Archive Failed Source File": {
+              "Type": "Task",
+              "Next": "Delete Failed File",
+              "Parameters": {
+                "Bucket.$": "$.detail.bucket.name",
+                "Key.$": "States.Format('error/{}',$.detail.object.key)",
+                "CopySource.$": "States.Format('{}/{}',$.detail.bucket.name,$.detail.object.key)"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+              "ResultPath": null
+            },
+            "Delete Failed File": {
+              "Type": "Task",
+              "Next": "Send Failure Notification",
+              "Parameters": {
+                "Bucket.$": "$.detail.bucket.name",
+                "Key.$": "$.detail.object.key"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:deleteObject",
+              "ResultPath": null
+            },
+            "Send Failure Notification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "Message.$": "$",
+                "TopicArn": "${SNSTopic}"
+              },
+              "Next": "Fail"
+            },
+            "Fail": {
+              "Type": "Fail"
+            },
+            "Glue StartJobRun": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${GlueJob}",
+                "Arguments": {
+                  "--tenant.$": "$.DecryptionResult.Payload.tenantName",
+                  "--file_key.$": "States.Format('{}{}',$.DecryptionResult.Payload.newFilePath,$.DecryptionResult.Payload.newFileName)",
+                  "--bucket.$": "$.DecryptionResult.Payload.bucket",
+                  "--extra-jars": "s3://${pS3BucketName}/drivers/mysql-connector-java-8.0.29.jar"
+                }
+              },
+              "Next": "Archive Encrypted File",
+              "ResultPath": null
+            },
+            "Archive Encrypted File": {
+              "Type": "Task",
+              "Next": "Delete Original File",
+              "Parameters": {
+                "Bucket.$": "$.detail.bucket.name",
+                "Key.$": "States.Format('archive/{}/{}',$.DecryptionResult.Payload.tenantName,$.DecryptionResult.Payload.originalFileName)",
+                "CopySource.$": "States.Format('{}/{}',$.detail.bucket.name,$.detail.object.key)"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+              "ResultPath": null
+            },
+            "Delete Original File": {
+              "Type": "Task",
+              "Next": "Delete Staged File",
+              "Parameters": {
+                "Bucket.$": "$.detail.bucket.name",
+                "Key.$": "$.detail.object.key"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:deleteObject",
+              "ResultPath": null
+            },
+            "Delete Staged File": {
+              "Type": "Task",
+              "Next": "Success Notification",
+              "Parameters": {
+                "Bucket.$": "$.detail.bucket.name",
+                "Key.$": "States.Format('{}{}',$.DecryptionResult.Payload.newFilePath,$.DecryptionResult.Payload.newFileName)"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:s3:deleteObject",
+              "ResultPath": null
+            },
+            "Success Notification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${SNSTopic}",
+                "Message.$": "$"
+              },
+              "Next": "Success"
+            },
+            "Success": {
+              "Type": "Succeed"
+            }
+          }
+        }
+
+  S3Bucket:
+    Type: AWS::S3::Bucket    
+    Properties:
+      BucketName: !Sub ${pS3BucketName}
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls : true
+        BlockPublicPolicy : true
+        IgnorePublicAcls : true
+        RestrictPublicBuckets : true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${pS3BucketName}/glue/gluejob.py"
+      Connections:
+        Connections:
+          - !Ref RDSNetworkConnection
+      ExecutionProperty:
+        MaxConcurrentRuns: 20
+      MaxRetries: 0
+      Role: !GetAtt GlueRole.Arn
+      GlueVersion: "3.0"
+      NumberOfWorkers: 2
+      WorkerType: "G.1X"
+
+  RDSNetworkConnection:
+    Type: 'AWS::Glue::Connection'
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionProperties:
+          Name: TestDBConnection
+          Type: Network
+        ConnectionType: NETWORK
+        Description: >-
+          Adding a Generic connection with VPC, Subnet and Security Group to
+          access SAP and other DBs
+        Name: GENERIC_CONNECTION
+        PhysicalConnectionRequirements:
+          AvailabilityZone: us-east-1a
+          SecurityGroupIdList:
+            - !Ref DBEC2SecurityGroup
+            - !Ref NoIngressSecurityGroup
+          SubnetId: !Ref PrivateSubnet1
+
+Outputs:
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join [ ",", [ !Ref PublicSubnet1, !Ref PublicSubnet2 ]]
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [ ",", [ !Ref PrivateSubnet1, !Ref PrivateSubnet2 ]]
+
+  PublicSubnet1:
+    Description: A reference to the public subnet in the 1st Availability Zone
+    Value: !Ref PublicSubnet1
+
+  PublicSubnet2:
+    Description: A reference to the public subnet in the 2nd Availability Zone
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: A reference to the private subnet in the 2nd Availability Zone
+    Value: !Ref PrivateSubnet2
+
+  NoIngressSecurityGroup:
+    Description: Security group with no ingress rule
+    Value: !Ref NoIngressSecurityGroup
